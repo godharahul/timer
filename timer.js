@@ -1,5 +1,6 @@
 (() => {
   const KEY = '__pip_timer_state__';
+
   const APP = window.__pip_timer_app__ || (window.__pip_timer_app__ = {
     win: null,
     tick: null,
@@ -9,12 +10,14 @@
   });
 
   const today = () => new Date().toLocaleDateString('en-CA');
+
   const blank = () => ({
     day: today(),
     mode: 'work',
     work: 0,
     rest: 0,
     activeSince: Date.now(),
+    paused: false,
     segments: []
   });
 
@@ -22,16 +25,22 @@
     try {
       const s = JSON.parse(localStorage.getItem(KEY) || 'null');
       if (!s || s.day !== today()) return blank();
-      return { ...blank(), ...s };
+      return {
+        ...blank(),
+        ...s,
+        paused: !!s.paused,
+        segments: Array.isArray(s.segments) ? s.segments : []
+      };
     } catch {
       return blank();
     }
   };
 
   const save = (s) => {
-    localStorage.setItem(KEY, JSON.stringify({ ...s, day: today() }));
-    window.__timerState = s;
-    APP.state = s;
+    const clean = { ...s, day: today() };
+    localStorage.setItem(KEY, JSON.stringify(clean));
+    APP.state = clean;
+    window.__timerState = clean;
   };
 
   const fmt = (ms) => {
@@ -61,10 +70,35 @@
     }
   };
 
-  const cleanup = () => {
-    clearTimers();
-    if (APP.win && APP.win.closed) APP.win = null;
-    if (APP.state) save(APP.state);
+  const finalizeOnClose = () => {
+    if (!APP.state || APP.state.paused) return;
+
+    const now = Date.now();
+    if (APP.state.mode === 'work') {
+      APP.state.work += now - APP.state.activeSince;
+    } else {
+      APP.state.rest += now - APP.state.activeSince;
+    }
+
+    APP.state.segments = APP.state.segments || [];
+    APP.state.segments.push({
+      mode: APP.state.mode,
+      start: APP.state.activeSince,
+      end: now
+    });
+
+    APP.state.activeSince = now;
+    APP.state.paused = true;
+    save(APP.state);
+  };
+
+  const resumeOnOpen = () => {
+    if (!APP.state) APP.state = load();
+    if (APP.state.paused) {
+      APP.state.activeSince = Date.now();
+      APP.state.paused = false;
+      save(APP.state);
+    }
   };
 
   const html = `<!doctype html>
@@ -148,7 +182,7 @@ button.primary{background:#4f46e5}
     }
 
     APP.state = load();
-    window.__timerState = APP.state;
+    resumeOnOpen();
 
     const pip = await documentPictureInPicture.requestWindow({ width: 420, height: 255 });
     APP.win = pip;
@@ -159,19 +193,25 @@ button.primary{background:#4f46e5}
     d.close();
 
     const E = (id) => d.getElementById(id);
-    let chartOpen = APP.chartOpen;
+    let chartOpen = true;
 
     const totalNow = () => {
       const now = Date.now();
       let work = APP.state.work;
       let rest = APP.state.rest;
-      if (APP.state.mode === 'work') work += now - APP.state.activeSince;
-      else rest += now - APP.state.activeSince;
+
+      if (!APP.state.paused) {
+        if (APP.state.mode === 'work') work += now - APP.state.activeSince;
+        else rest += now - APP.state.activeSince;
+      }
+
       return {
         work,
         rest,
         total: work + rest,
-        cur: APP.state.mode === 'work' ? work : rest
+        cur: APP.state.paused
+          ? (APP.state.mode === 'work' ? work : rest)
+          : (APP.state.mode === 'work' ? work : rest)
       };
     };
 
@@ -205,6 +245,8 @@ button.primary{background:#4f46e5}
     };
 
     const swap = () => {
+      if (APP.state.paused) return;
+
       const now = Date.now();
       if (APP.state.mode === 'work') APP.state.work += now - APP.state.activeSince;
       else APP.state.rest += now - APP.state.activeSince;
@@ -238,6 +280,12 @@ button.primary{background:#4f46e5}
       }, msToMidnight());
     };
 
+    const cleanup = () => {
+      finalizeOnClose();
+      clearTimers();
+      if (APP.win === pip) APP.win = null;
+    };
+
     pip.addEventListener('pagehide', cleanup);
     pip.addEventListener('beforeunload', cleanup);
 
@@ -248,14 +296,11 @@ button.primary{background:#4f46e5}
       APP.chartOpen = chartOpen;
       E('ct').classList.toggle('open', chartOpen);
       E('ch').textContent = chartOpen ? 'Chart ▴' : 'Chart ▾';
-      try {
-        pip.resizeTo(420, chartOpen ? 395 : 255);
-      } catch {}
+      try { pip.resizeTo(420, chartOpen ? 395 : 255); } catch {}
     };
 
     E('ct').classList.add('open');
     E('ch').textContent = 'Chart ▴';
-    chartOpen = true;
     APP.chartOpen = true;
 
     render();
